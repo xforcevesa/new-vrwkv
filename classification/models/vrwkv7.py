@@ -92,7 +92,7 @@ class WindRWKV7(torch.autograd.Function):
         
 def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
         B,T,HC = q.shape
-        q,w,k,v,a,b = [seqlen_ceil_16(i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
+        q,w,k,v,a,b = [seqlen_ceil_16(i.bfloat16().view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
         return WindRWKV7.apply(w,q,k,v,a,b)[:, :T, :, :].view(B,T,HC)
 
 class RWKV7(nn.Module):
