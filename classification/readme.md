@@ -6,11 +6,13 @@ based on https://github.com/microsoft/Swin-Transformer#20240103
 
 ## Run
 
-To run training for `vrwkv6` model, run:
+To run training for `vrwkv6` or `vrwkv7` model, run:
 
 ```bash
 mkdir tmp
 # Downloading your ImageNet dataset
 # Ensuring it is in the directory named "imagenet"
-bash train.sh
+bash train-vrwkv6.sh
+# OR
+bash train-vrwkv7.sh
 ```

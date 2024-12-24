@@ -5,6 +5,7 @@ import torch
 from .vmamba import VSSM
 from .vrwkv6 import VRWKV6
 
+from .vrwkv7 import VRWKV7
 
 def build_vssm_model(config, **kwargs):
     model_type = config.MODEL.TYPE
@@ -48,21 +49,24 @@ def build_vssm_model(config, **kwargs):
 
 def build_vrwkv6_model(config, **kwargs):
     model_type = config.MODEL.TYPE
+    args = dict(
+        img_size=config.DATA.IMG_SIZE,
+        patch_size=config.MODEL.VSSM.PATCH_SIZE,
+        in_channels=config.MODEL.VSSM.IN_CHANS,
+        drop_path_rate=config.MODEL.DROP_PATH_RATE,
+        embed_dims=config.MODEL.VSSM.EMBED_DIM,
+        num_heads=4,
+        num_classes=config.MODEL.NUM_CLASSES,
+        depth=config.MODEL.VSSM.DEPTHS,
+        norm_layer=config.MODEL.VSSM.NORM_LAYER,
+        key_norm=True,
+        final_norm=True,
+        dims=config.MODEL.VSSM.EMBED_DIM
+    )
     if model_type in ["vrwkv6"]:
-        return VRWKV6(
-            img_size=config.DATA.IMG_SIZE,
-            patch_size=config.MODEL.VSSM.PATCH_SIZE,
-            in_channels=config.MODEL.VSSM.IN_CHANS,
-            drop_path_rate=config.MODEL.DROP_PATH_RATE,
-            embed_dims=config.MODEL.VSSM.EMBED_DIM,
-            num_heads=4,
-            num_classes=config.MODEL.NUM_CLASSES,
-            depth=config.MODEL.VSSM.DEPTHS,
-            norm_layer=config.MODEL.VSSM.NORM_LAYER,
-            key_norm=True,
-            final_norm=True,
-            dims=config.MODEL.VSSM.EMBED_DIM
-        )
+        return VRWKV6(**args)
+    elif model_type in ["vrwkv7"]:
+        return VRWKV7(**args)
     return None
 
 
