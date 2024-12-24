@@ -3,6 +3,7 @@ from functools import partial
 import torch
 
 from .vmamba import VSSM
+from .vrwkv6 import VRWKV6
 
 
 def build_vssm_model(config, **kwargs):
@@ -45,9 +46,30 @@ def build_vssm_model(config, **kwargs):
 
     return None
 
+def build_vrwkv6_model(config, **kwargs):
+    model_type = config.MODEL.TYPE
+    if model_type in ["vrwkv6"]:
+        return VRWKV6(
+            img_size=config.DATA.IMG_SIZE,
+            patch_size=config.MODEL.VSSM.PATCH_SIZE,
+            in_channels=config.MODEL.VSSM.IN_CHANS,
+            drop_path_rate=config.MODEL.DROP_PATH_RATE,
+            embed_dims=config.MODEL.VSSM.EMBED_DIM,
+            num_heads=4,
+            num_classes=config.MODEL.NUM_CLASSES,
+            depth=config.MODEL.VSSM.DEPTHS,
+            norm_layer=config.MODEL.VSSM.NORM_LAYER,
+            key_norm=True,
+            final_norm=True,
+            dims=config.MODEL.VSSM.EMBED_DIM
+        )
+    return None
+
 
 def build_model(config, is_pretrain=False):
     model = None
+    if model is None:
+        model = build_vrwkv6_model(config)
     if model is None:
         model = build_vssm_model(config)
     if model is None:

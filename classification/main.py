@@ -109,15 +109,20 @@ def main(config, args):
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
     model = build_model(config)
 
-    if dist.get_rank() == 0:
-        if hasattr(model, 'flops'):
-            logger.info(str(model))
-            n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            logger.info(f"number of params: {n_parameters}")
-            flops = model.flops()
-            logger.info(f"number of GFLOPs: {flops / 1e9}")
-        else:
-            logger.info(flop_count_str(FlopCountAnalysis(model, (dataset_val[0][0][None],))))
+    logger.info(str(model))
+    n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"number of params: {n_parameters}")
+
+    # Bugs Await For Fixed
+    # if dist.get_rank() == 0:
+    #     if hasattr(model, 'flops'):
+    #         logger.info(str(model))
+    #         n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    #         logger.info(f"number of params: {n_parameters}")
+    #         flops = model.flops()
+    #         logger.info(f"number of GFLOPs: {flops / 1e9}")
+    #     else:
+    #         logger.info(flop_count_str(FlopCountAnalysis(model, (dataset_val[0][0][None],))))
     torch.cuda.empty_cache()
     dist.barrier()
     model.cuda()
