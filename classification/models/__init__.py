@@ -2,14 +2,12 @@ import os
 from functools import partial
 import torch
 
-from .vmamba import VSSM
-from .vrwkv6 import VRWKV6
 
-from .vrwkv7 import VRWKV7
 
 def build_vssm_model(config, **kwargs):
     model_type = config.MODEL.TYPE
     if model_type in ["vssm"]:
+        from .vmamba import VSSM
         model = VSSM(
             patch_size=config.MODEL.VSSM.PATCH_SIZE, 
             in_chans=config.MODEL.VSSM.IN_CHANS, 
@@ -64,8 +62,10 @@ def build_vrwkv6_model(config, **kwargs):
         dims=config.MODEL.VSSM.EMBED_DIM
     )
     if model_type in ["vrwkv6"]:
+        from .vrwkv6 import VRWKV6
         return VRWKV6(**args)
     elif model_type in ["vrwkv7"]:
+        from .vrwkv7 import VRWKV7
         return VRWKV7(**args)
     return None
 

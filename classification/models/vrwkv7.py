@@ -46,22 +46,29 @@ HEAD_SIZE = 24
 BaseModule = nn.Module
 BaseBackbone = nn.Module
 
-from torch.utils.cpp_extension import load
-wkv7g = load(name="wind_wkv7",
-                 sources=["models/cuda_v7/wind_rwkv7.cpp", 
-                          "models/cuda_v7/wind_rwkv7.cu"],
-                 verbose=False, extra_cuda_cflags=["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization",
-                    f"-D_C_={HEAD_SIZE}"])
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
-def seqlen_ceil_16(x: torch.Tensor):
+CHUNK_LEN = 16
+def seqlen_ceil_chunk(x: torch.Tensor):
     seqlen = x.shape[1]
-    concat_seqlen = 16 - seqlen % 16 if seqlen % 16 != 0 else 0
+    concat_seqlen = CHUNK_LEN - seqlen % CHUNK_LEN if seqlen % CHUNK_LEN != 0 else 0
     if concat_seqlen != 0:
-        concat_tensor = torch.zeros(x.shape[0], concat_seqlen, x.shape[-2], x.shape[-1]).to(x.device).to(x.dtype)
+        concat_tensor = torch.zeros(x.shape[0], concat_seqlen, *x.shape[2:]).to(x.device).to(x.dtype)
         x = torch.concat([x, concat_tensor], dim=1)
     return x
 
-class WindRWKV7(torch.autograd.Function):
+from torch.utils.cpp_extension import load
+CUDA_FLAGS = ["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization"]
+
+# Set wind_cuda to True to reproduce the crash
+wind_cuda = False
+
+if wind_cuda:
+    # This code may cause SIGABRT on NVIDIA H800 & CUDA 12.5
+    load(name="wind", sources=['models/cuda_v7/wind_rwkv7.cu', 'models/cuda_v7/wind_rwkv7.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=CUDA_FLAGS+[f'-D_C_={HEAD_SIZE}'])
+
+    class WindRWKV7(torch.autograd.Function):
         @staticmethod
         def forward(ctx,w,q,k,v,a,b):
             B,T,H,C = w.shape
@@ -69,13 +76,10 @@ class WindRWKV7(torch.autograd.Function):
             assert T%16 == 0
             assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,a,b,s0])
             w,q,k,v,a,b,s0 = [i.contiguous() for i in [w,q,k,v,a,b,s0]]
-            # for i in [w,q,k,v,a,b,s0]:
-            #     print(i.shape)
-            # exit(0)
             y = torch.empty_like(v)
             sT = torch.empty_like(s0)
             s = torch.zeros(B,H,T//16,C,C, dtype=w.dtype,device=w.device)
-            wkv7g.forward(w,q,k,v,a,b, s0,y,s,sT)
+            torch.ops.wind.forward(w,q,k,v,a,b, s0,y,s,sT)
             ctx.save_for_backward(w,q,k,v,a,b,s)
             return y
         
@@ -87,13 +91,45 @@ class WindRWKV7(torch.autograd.Function):
             assert all(i.dtype==torch.bfloat16 for i in [dy])
             dy,dsT = [i.contiguous() for i in [dy,dsT]]
             dw,dq,dk,dv,da,db,ds0 = [torch.empty_like(x) for x in [w,q,k,v,a,b,dsT]]
-            wkv7g.backward(w,q,k,v,a,b, dy,s,dsT, dw,dq,dk,dv,da,db,ds0)
+            torch.ops.wind.backward(w,q,k,v,a,b, dy,s,dsT, dw,dq,dk,dv,da,db,ds0)
             return dw,dq,dk,dv,da,db
-        
-def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
+    
+    def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
         B,T,HC = q.shape
-        q,w,k,v,a,b = [seqlen_ceil_16(i.bfloat16().view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
-        return WindRWKV7.apply(w,q,k,v,a,b)[:, :T, :, :].view(B,T,HC)
+        dtype = q.dtype
+        q,w,k,v,a,b = [seqlen_ceil_chunk(i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
+        return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,HC)[:, :T, :].to(dtype)
+
+else:
+    load(name="wind_backstepping", sources=[f'models/cuda_v7/backstepping_f32_{1 if HEAD_SIZE < 128 else 2}.cu', 'models/cuda_v7/backstepping_f32.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=CUDA_FLAGS+[f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}"])
+
+    class WindBackstepping(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, w,q,k,v,z,b):
+            B,T,H,C = w.shape 
+            assert T%CHUNK_LEN == 0
+            assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,z,b])
+            w,q,k,v,z,b = [i.contiguous() for i in [w,q,k,v,z,b]]
+            y = torch.empty_like(v)
+            s = torch.empty(B,H,T//CHUNK_LEN,C,C, dtype=torch.float32,device=w.device)
+            sa = torch.empty(B,T,H,C, dtype=torch.float32,device=w.device)
+            torch.ops.wind_backstepping.forward(w,q,k,v,z,b, y,s,sa)
+            ctx.save_for_backward(w,q,k,v,z,b,s,sa)
+            return y
+        @staticmethod
+        def backward(ctx, dy):
+            assert dy.dtype == torch.bfloat16
+            dy = dy.contiguous()
+            w,q,k,v,z,b,s,sa = ctx.saved_tensors
+            dw,dq,dk,dv,dz,db = [torch.empty_like(x) for x in [w,q,k,v,z,b]]
+            torch.ops.wind_backstepping.backward(w,q,k,v,z,b, dy,s,sa, dw,dq,dk,dv,dz,db)
+            return dw,dq,dk,dv,dz,db
+
+    def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
+        B,T,HC = q.shape
+        dtype = q.dtype
+        q,w,k,v,a,b = [seqlen_ceil_chunk(i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
+        return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)[:, :T, :].to(dtype)
 
 class RWKV7(nn.Module):
     def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
@@ -185,7 +221,7 @@ class RWKV7(nn.Module):
             self.key = nn.Linear(n_embd, dim_att, bias=False)
             self.value = nn.Linear(n_embd, dim_att, bias=False)
             self.output = nn.Linear(dim_att, n_embd, bias=False)
-            self.ln_x = nn.GroupNorm(self.n_head, dim_att, eps=6.4e-5, dtype=torch.bfloat16)
+            self.ln_x = nn.GroupNorm(self.n_head, dim_att, eps=6.4e-5)
 
             self.receptance.weight.data.uniform_(-0.5/(self.n_embd**0.5), 0.5/(self.n_embd**0.5))
             self.key.weight.data.uniform_(-0.05/(self.n_embd**0.5), 0.05/(self.n_embd**0.5))
@@ -401,6 +437,7 @@ class VRWKV7(BaseBackbone):
         # self.out_indices = out_indices
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.num_layers)]
         self.layers = nn.ModuleList()
+        # from . import vrwkv6
         for i in range(self.num_layers):
             self.layers.append(RWKV7Block(
                 n_embd=embed_dims,
@@ -462,7 +499,7 @@ class VRWKV7(BaseBackbone):
             if isinstance(layer, RWKV7Block):
                 x, v1 = layer(x, v1, x0)
             else:
-                x = layer(x)
+                x = layer(x, patch_resolution)
             if i == len(self.layers) - 1 and self.final_norm:
                 x = self.ln1(x)
 

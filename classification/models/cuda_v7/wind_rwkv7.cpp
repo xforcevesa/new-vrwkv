@@ -28,7 +28,7 @@ TORCH_LIBRARY(wind, m) {
     m.def("backward(Tensor w, Tensor q, Tensor k, Tensor v, Tensor z, Tensor a, Tensor dy, Tensor s, Tensor dsT, Tensor(a!) dw, Tensor(b!) dq, Tensor(c!) dk, Tensor(d!) dv, Tensor(e!) dz, Tensor(f!) da, Tensor(g!) ds0) -> ()");
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("forward", &forward, "wind_wkv7 forward");
-    m.def("backward", &backward, "wind_wkv7 backward");
+TORCH_LIBRARY_IMPL(wind, CUDA, m) {
+    m.impl("forward", &forward);
+    m.impl("backward", &backward);
 }
