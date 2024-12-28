@@ -527,13 +527,10 @@ class VRWKV6(BaseBackbone):
                 permute_head_size -= 1
             x = x.view(*x.shape[:2], seqlen // permute_head_size, permute_head_size)
             return x
-        self.classifier = nn.Sequential(OrderedDict(
-            norm=norm_layer(self.embed_dims), # B,T,C
-            permute=Permute(func=permute_reshape),
-            avgpool=nn.AdaptiveAvgPool2d(img_size // 4),
-            flatten=nn.Flatten(),
-            head=nn.Linear(self.embed_dims*(img_size // 4)*(img_size // 4), num_classes),
-        ))
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(self.embed_dims, num_classes)
+        )
 
 
     def forward(self, x):
@@ -559,6 +556,7 @@ class VRWKV6(BaseBackbone):
                 x = self.ln1(x)
 
         # print(x.shape)
+        x = x.mean(dim=1)
         x = self.classifier(x)
                 
         return x

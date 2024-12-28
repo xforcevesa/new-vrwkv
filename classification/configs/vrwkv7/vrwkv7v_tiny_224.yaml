@@ -3,8 +3,8 @@ MODEL:
   NAME: vrwkv7_tiny_0230s
   DROP_PATH_RATE: 0.2
   VSSM:
-    EMBED_DIM: 96
-    DEPTHS: [ 2, 2, 8, 2 ]
+    EMBED_DIM: 512
+    DEPTHS: [ 2, 2, 8, 2, 2, 2 ]
     SSM_D_STATE: 1
     SSM_DT_RANK: "auto"
     SSM_RATIO: 1.0
