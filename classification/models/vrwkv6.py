@@ -39,7 +39,7 @@ class Permute(nn.Module):
 logger = logging.getLogger(__name__)
 
 T_MAX = 10000
-HEAD_SIZE = 24
+HEAD_SIZE = 32
 
 BaseModule = nn.Module
 BaseBackbone = nn.Module

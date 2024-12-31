@@ -22,8 +22,10 @@ def process_logfile(filename: str, name: str):
 
 
 def main():
-    process_logfile(filename="log.txt.4", name="Original")
-    process_logfile(filename="log.txt.5", name="New")
+    # process_logfile(filename="log.txt.4", name="Original")
+    process_logfile(filename="log.txt.5", name="v7 Uni-Shift")
+    process_logfile(filename="log.txt.6", name="v6 Quad-Shift")
+    process_logfile(filename="log.txt.7", name="v7 Quad-Shift")
     plt.legend()
     plt.xlabel("Iterations")
     plt.ylabel("Accuracy (%)")

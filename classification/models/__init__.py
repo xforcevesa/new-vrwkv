@@ -53,7 +53,7 @@ def build_vrwkv6_model(config, **kwargs):
         in_channels=config.MODEL.VSSM.IN_CHANS,
         drop_path_rate=config.MODEL.DROP_PATH_RATE,
         embed_dims=config.MODEL.VSSM.EMBED_DIM,
-        num_heads=4,
+        num_heads=16,
         num_classes=config.MODEL.NUM_CLASSES,
         depth=config.MODEL.VSSM.DEPTHS,
         norm_layer=config.MODEL.VSSM.NORM_LAYER,

@@ -64,6 +64,33 @@ CUDA_FLAGS = ["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-de
 # Set wind_cuda to True to reproduce the crash
 wind_cuda = False
 
+def q_shift_multihead(input, shift_pixel=1, head_dim=HEAD_SIZE, 
+                      patch_resolution=None, with_cls_token=False):
+    B, N, C = input.shape
+    assert C % head_dim == 0
+    assert head_dim % 4 == 0
+    if with_cls_token:
+        cls_tokens = input[:, [-1], :]
+        input = input[:, :-1, :]
+    input = input.transpose(1, 2).reshape(
+        B, -1, head_dim, patch_resolution[0], patch_resolution[1])  # [B, n_head, head_dim H, W]
+    B, _, _, H, W = input.shape
+    output = torch.zeros_like(input)
+    output[:, :, 0:int(head_dim*1/4), :, shift_pixel:W] = \
+        input[:, :, 0:int(head_dim*1/4), :, 0:W-shift_pixel]
+    output[:, :, int(head_dim/4):int(head_dim/2), :, 0:W-shift_pixel] = \
+        input[:, :, int(head_dim/4):int(head_dim/2), :, shift_pixel:W]
+    output[:, :, int(head_dim/2):int(head_dim/4*3), shift_pixel:H, :] = \
+        input[:, :, int(head_dim/2):int(head_dim/4*3), 0:H-shift_pixel, :]
+    output[:, :, int(head_dim*3/4):int(head_dim), 0:H-shift_pixel, :] = \
+        input[:, :, int(head_dim*3/4):int(head_dim), shift_pixel:H, :]
+    if with_cls_token:
+        output = output.reshape(B, C, N-1).transpose(1, 2)
+        output = torch.cat((output, cls_tokens), dim=1)
+    else:
+        output = output.reshape(B, C, N).transpose(1, 2)
+    return output
+
 if wind_cuda:
     # This code may cause SIGABRT on NVIDIA H800 & CUDA 12.5
     load(name="wind", sources=['models/cuda_v7/wind_rwkv7.cu', 'models/cuda_v7/wind_rwkv7.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=CUDA_FLAGS+[f'-D_C_={HEAD_SIZE}'])
@@ -144,6 +171,10 @@ class RWKV7(nn.Module):
         self.head_size = HEAD_SIZE
         self.n_head = dim_att // self.head_size
         assert dim_att % self.n_head == 0
+
+        self.shift_func = eval(shift_mode)
+        self.with_cls_token = with_cls_token
+        self.shift_pixel = shift_pixel
 
         with torch.no_grad():
             ratio_0_to_1 = layer_id / (n_layer - 1)  # 0 to 1
@@ -228,10 +259,11 @@ class RWKV7(nn.Module):
             self.value.weight.data.uniform_(-0.5/(self.n_embd**0.5), 0.5/(self.n_embd**0.5))
             self.output.weight.data.zero_()
 
-    def forward(self, x, v1):
+    def forward(self, x, v1, res):
         B, T, C = x.size()
         H = self.n_head
-        xx = self.time_shift(x) - x
+        xx = self.shift_func(x, self.shift_pixel, patch_resolution=res, 
+                             with_cls_token=self.with_cls_token) - x
 
         xxx = x + xx * self.time_maa_x
         xxx = torch.tanh(xxx @ self.time_maa_w1).view(B*T, 4, -1).transpose(0, 1)
@@ -299,9 +331,9 @@ class RWKV7Block(nn.Module):
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
 
-    def forward(self, x, v1, x0):
+    def forward(self, x, v1, x0, res):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
-        x1, v1 = self.attn(self.ln1(x), v1)
+        x1, v1 = self.attn(self.ln1(x), v1, res)
         x = x + x1
         x = x + self.mlp(self.ln2(x))
         return x, v1
@@ -494,7 +526,7 @@ class VRWKV7(BaseBackbone):
 
         for i, layer in enumerate(self.layers):
             if isinstance(layer, RWKV7Block):
-                x, v1 = layer(x, v1, x0)
+                x, v1 = layer(x, v1, x0, patch_resolution)
             else:
                 x = layer(x, patch_resolution)
             if i == len(self.layers) - 1 and self.final_norm:
