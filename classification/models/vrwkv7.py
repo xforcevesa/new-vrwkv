@@ -155,188 +155,450 @@ else:
     def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
         B,T,HC = q.shape
         dtype = q.dtype
-        q,w,k,v,a,b = [seqlen_ceil_chunk(i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
+        q,w,k,v,a,b = [seqlen_ceil_chunk(i.to(torch.bfloat16).view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
         return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)[:, :T, :].to(dtype)
 
-class RWKV7(nn.Module):
-    def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
-                 shift_pixel=1, drop_path=0., hidden_rate=4, init_mode='fancy',
-                 init_values=None, post_norm=False, key_norm=False, with_cls_token=False,
-                 with_cp=False):
-        super().__init__()
-        self.layer_id = layer_id
-        self.n_embd = n_embd
-        dim_att = n_embd
+use_classic_rwkv7 = False
+if use_classic_rwkv7:
+    class RWKV7(nn.Module):
+        def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
+                    shift_pixel=1, drop_path=0., hidden_rate=4, init_mode='fancy',
+                    init_values=None, post_norm=False, key_norm=False, with_cls_token=False,
+                    with_cp=False):
+            super().__init__()
+            self.layer_id = layer_id
+            self.n_embd = n_embd
+            dim_att = n_embd
 
-        self.head_size = HEAD_SIZE
-        self.n_head = dim_att // self.head_size
-        assert dim_att % self.n_head == 0
+            self.head_size = HEAD_SIZE
+            self.n_head = dim_att // self.head_size
+            assert dim_att % self.n_head == 0
 
-        self.shift_func = eval(shift_mode)
-        self.with_cls_token = with_cls_token
-        self.shift_pixel = shift_pixel
+            self.shift_func = eval(shift_mode)
+            self.with_cls_token = with_cls_token
+            self.shift_pixel = shift_pixel
 
-        with torch.no_grad():
-            ratio_0_to_1 = layer_id / (n_layer - 1)  # 0 to 1
-            ratio_1_to_almost0 = 1.0 - (layer_id / n_layer)  # 1 to ~0
-            ddd = torch.ones(1, 1, n_embd)
-            for i in range(n_embd):
-                ddd[0, 0, i] = i / n_embd
+            with torch.no_grad():
+                ratio_0_to_1 = layer_id / (n_layer - 1)  # 0 to 1
+                ratio_1_to_almost0 = 1.0 - (layer_id / n_layer)  # 1 to ~0
+                ddd = torch.ones(1, 1, n_embd)
+                for i in range(n_embd):
+                    ddd[0, 0, i] = i / n_embd
 
-            # initialization comes from fitting my RWKV-6 7B runs
-            # merging r&g w&a to save params
-            self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, 0.6 * ratio_1_to_almost0 ** 0.9))
-            self.time_maa_rg = nn.Parameter(1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0))
-            self.time_maa_wa = nn.Parameter(1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0))
-            self.time_maa_k = nn.Parameter(1.0 - (torch.pow(ddd, 0.9 * ratio_1_to_almost0) + 0.4 * ratio_0_to_1))
-            self.time_maa_v = nn.Parameter(1.0 - (torch.pow(ddd, 0.4 * ratio_1_to_almost0) + 0.6 * ratio_0_to_1))
+                # initialization comes from fitting my RWKV-6 7B runs
+                # merging r&g w&a to save params
+                self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, 0.6 * ratio_1_to_almost0 ** 0.9))
+                self.time_maa_rg = nn.Parameter(1.0 - torch.pow(ddd, 0.2 * ratio_1_to_almost0))
+                self.time_maa_wa = nn.Parameter(1.0 - torch.pow(ddd, 0.9 * ratio_1_to_almost0))
+                self.time_maa_k = nn.Parameter(1.0 - (torch.pow(ddd, 0.9 * ratio_1_to_almost0) + 0.4 * ratio_0_to_1))
+                self.time_maa_v = nn.Parameter(1.0 - (torch.pow(ddd, 0.4 * ratio_1_to_almost0) + 0.6 * ratio_0_to_1))
 
-            decay_speed = torch.ones(dim_att)
-            for n in range(dim_att):
-                decay_speed[n] = -7 + 5 * (n / (dim_att - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
-            self.time_decay = nn.Parameter(decay_speed.reshape(1,1,dim_att) + 0.5) # !!! 0.5 comes from F.softplus !!!
+                decay_speed = torch.ones(dim_att)
+                for n in range(dim_att):
+                    decay_speed[n] = -7 + 5 * (n / (dim_att - 1)) ** (0.85 + 1.0 * ratio_0_to_1 ** 0.5)
+                self.time_decay = nn.Parameter(decay_speed.reshape(1,1,dim_att) + 0.5) # !!! 0.5 comes from F.softplus !!!
 
-            self.time_faaaa = nn.Parameter(torch.zeros(1,1,self.n_head,self.head_size))
-            self.time_aaaaa = nn.Parameter(torch.zeros(1,1,dim_att))
+                self.time_faaaa = nn.Parameter(torch.zeros(1,1,self.n_head,self.head_size))
+                self.time_aaaaa = nn.Parameter(torch.zeros(1,1,dim_att))
 
-            def ortho_init(x, scale):
+                def ortho_init(x, scale):
+                    with torch.no_grad():
+                        shape = x.shape
+                        if len(shape) == 2:
+                            gain = math.sqrt(shape[0] / shape[1]) if shape[0] > shape[1] else 1
+                            nn.init.orthogonal_(x, gain=gain * scale)
+                        elif len(shape) == 3:
+                            gain = math.sqrt(shape[1] / shape[2]) if shape[1] > shape[2] else 1
+                            for i in range(shape[0]):
+                                nn.init.orthogonal_(x[i], gain=gain * scale)
+                        else:
+                            assert False
+                        return x
+
+                D_MIX_LORA = 28
+                self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*4))
+                self.time_maa_w2 = nn.Parameter(ortho_init(torch.zeros(4, D_MIX_LORA, n_embd), 0.1))
+
+                D_DECAY_LORA = 64
+                self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
+                self.time_decay_w2 = nn.Parameter(ortho_init(torch.zeros(D_DECAY_LORA, dim_att), 0.1))
+
+                D_AAA_LORA = 16
+                self.time_aaa_w1 = nn.Parameter(torch.zeros(n_embd, D_AAA_LORA))
+                self.time_aaa_w2 = nn.Parameter(ortho_init(torch.zeros(D_AAA_LORA, dim_att), 0.1))
+
+                D_KKK_LORA = 16
+                self.time_kkk_w1 = nn.Parameter(torch.zeros(n_embd, D_KKK_LORA))
+                self.time_kkk_w2 = nn.Parameter(ortho_init(torch.zeros(D_KKK_LORA, dim_att), 0.1))
+
+                D_GATE_LORA = 120
+                self.gate_w1 = nn.Parameter(torch.zeros(n_embd, D_GATE_LORA))
+                self.gate_w2 = nn.Parameter(ortho_init(torch.zeros(D_GATE_LORA, dim_att), 0.1))
+
+                D_MA_LORA = 16
+                self.ma_w1 = nn.Parameter(torch.zeros(n_embd, D_MA_LORA))
+                self.ma_w2 = nn.Parameter(ortho_init(torch.zeros(D_MA_LORA, dim_att), 0.1))
+                self.time_misc_a = nn.Parameter(torch.zeros(1,1,n_embd))
+                D_MK_LORA = 16
+                self.mk_w1 = nn.Parameter(torch.zeros(n_embd, D_MK_LORA))
+                self.mk_w2 = nn.Parameter(ortho_init(torch.zeros(D_MK_LORA, dim_att), 0.1))
+                self.time_misc_k = nn.Parameter(torch.zeros(1,1,n_embd))
+                if layer_id != 0:
+                    D_MV_LORA = 16
+                    self.mv_w1 = nn.Parameter(torch.zeros(n_embd, D_MV_LORA))
+                    self.mv_w2 = nn.Parameter(ortho_init(torch.zeros(D_MV_LORA, dim_att), 0.1))
+                    self.time_misc_v = nn.Parameter(torch.zeros(1,1,n_embd)+1.0)
+
+                self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
+                self.receptance = nn.Linear(n_embd, dim_att, bias=False)
+                self.key = nn.Linear(n_embd, dim_att, bias=False)
+                self.value = nn.Linear(n_embd, dim_att, bias=False)
+                self.output = nn.Linear(dim_att, n_embd, bias=False)
+                self.ln_x = nn.GroupNorm(self.n_head, dim_att, eps=6.4e-5)
+
+                self.receptance.weight.data.uniform_(-0.5/(self.n_embd**0.5), 0.5/(self.n_embd**0.5))
+                self.key.weight.data.uniform_(-0.05/(self.n_embd**0.5), 0.05/(self.n_embd**0.5))
+                self.value.weight.data.uniform_(-0.5/(self.n_embd**0.5), 0.5/(self.n_embd**0.5))
+                self.output.weight.data.zero_()
+
+        def forward(self, x, v1, res):
+            B, T, C = x.size()
+            H = self.n_head
+            xx = self.shift_func(x, self.shift_pixel, patch_resolution=res, 
+                                with_cls_token=self.with_cls_token) - x
+
+            xxx = x + xx * self.time_maa_x
+            xxx = torch.tanh(xxx @ self.time_maa_w1).view(B*T, 4, -1).transpose(0, 1)
+            xxx = torch.bmm(xxx, self.time_maa_w2).view(4, B, T, -1)
+            xrg, xwa, xk, xv = xxx.unbind(dim=0)
+
+            xrg = x + xx * (self.time_maa_rg + xrg)
+            xwa = x + xx * (self.time_maa_wa + xwa)
+            xk = x + xx * (self.time_maa_k + xk)
+            xv = x + xx * (self.time_maa_v + xv)
+
+            r = self.receptance(xrg)
+            w = -F.softplus(-(self.time_decay + torch.tanh(xwa @ self.time_decay_w1) @ self.time_decay_w2)) - 0.5
+            k = self.key(xk)
+            v = self.value(xv)
+            if self.layer_id == 0:
+                v1 = v
+            else:
+                v = v + (v1 - v) * torch.sigmoid(self.time_misc_v + (xv @ self.mv_w1) @ self.mv_w2)
+            g = torch.sigmoid(xrg @ self.gate_w1) @ self.gate_w2
+
+            kk = k + torch.tanh(xk @ self.time_kkk_w1) @ self.time_kkk_w2
+            kk = F.normalize(kk.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,C)
+            a = torch.sigmoid(self.time_aaaaa + (xwa @ self.time_aaa_w1) @ self.time_aaa_w2)
+
+            ma = torch.sigmoid(self.time_misc_a + (xwa @ self.ma_w1) @ self.ma_w2)
+            k = k * ma + k*a * (1 - ma)
+            mk = torch.sigmoid(self.time_misc_k + (xk @ self.mk_w1) @ self.mk_w2)
+            k = k * torch.clamp(w*mk, max=0).exp()
+
+            x = RUN_CUDA_RWKV7g(r.bfloat16(), w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16())
+            x = self.ln_x(x.view(B * T, C)).view(B, T, C)
+
+            x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.time_faaaa).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
+            x = self.output(x * g)
+            return x, v1
+        
+    class MLP(nn.Module):
+
+        def __init__(self, n_embd):
+            super().__init__()
+            self.c_fc    = nn.Linear(n_embd, 7 * n_embd // 2, bias=False)
+            self.c_proj  = nn.Linear(7 * n_embd // 2, n_embd, bias=False)
+            self.c_proj.weight.data.zero_() # zero init suggested by @Grad62304977
+
+        def forward(self, x):
+            x = self.c_fc(x)
+            x = F.relu(x).square() # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
+            x = self.c_proj(x)
+            return x
+        
+    class RWKV7Block(nn.Module):
+
+        def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
+                    shift_pixel=1, drop_path=0., hidden_rate=4, init_mode='fancy',
+                    init_values=None, post_norm=False, key_norm=False, with_cls_token=False,
+                    with_cp=False):
+            super().__init__()
+            self.attn = RWKV7(n_embd, n_head, n_layer, layer_id, shift_mode,
+                    shift_pixel, drop_path, hidden_rate, init_mode,
+                    init_values, post_norm, key_norm, with_cls_token,
+                    with_cp)
+            self.mlp = MLP(n_embd=n_embd)
+            self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
+            self.ln1 = nn.LayerNorm(n_embd)
+            self.ln2 = nn.LayerNorm(n_embd)
+
+        def forward(self, x, v1, x0, res):
+            x = self.lambdas[0] * x + self.lambdas[1] * x0
+            x1, v1 = self.attn(self.ln1(x), v1, res)
+            x = x + x1
+            x = x + self.mlp(self.ln2(x))
+            return x, v1
+
+else:
+    class VRWKV_SpatialMix_V6(BaseModule):
+        def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
+                    shift_pixel=1, init_mode='fancy', key_norm=False, with_cls_token=False, 
+                    with_cp=False):
+            super().__init__()
+            self.layer_id = layer_id
+            self.n_layer = n_layer
+            self.n_embd = n_embd
+            self.attn_sz = n_embd
+
+            self.n_head = n_head
+            self.head_size = self.attn_sz // self.n_head
+            # print(self.head_size, HEAD_SIZE, self.attn_sz, self.n_head)
+            assert self.head_size == HEAD_SIZE
+            self.device = None
+            self._init_weights(init_mode)
+            self.with_cls_token = with_cls_token
+            self.shift_pixel = shift_pixel
+            self.shift_mode = shift_mode
+            self.shift_func = eval(shift_mode)
+
+            self.key = nn.Linear(self.n_embd, self.attn_sz, bias=False)
+            self.value = nn.Linear(self.n_embd, self.attn_sz, bias=False)
+            self.receptance = nn.Linear(self.n_embd, self.attn_sz, bias=False)
+            self.gate = nn.Linear(self.n_embd, self.attn_sz, bias=False)
+
+            self.time_aaaaa = nn.Parameter(torch.zeros(1,1,self.n_embd))
+
+            if key_norm:
+                self.key_norm = nn.LayerNorm(n_embd)
+            else:
+                self.key_norm = None
+            self.output = nn.Linear(self.attn_sz, n_embd, bias=False)
+
+            self.ln_x = nn.GroupNorm(self.n_head, self.attn_sz, eps=1e-5)
+            self.with_cp = with_cp
+
+        def _init_weights(self, init_mode):
+            if init_mode=='fancy':
                 with torch.no_grad():
-                    shape = x.shape
-                    if len(shape) == 2:
-                        gain = math.sqrt(shape[0] / shape[1]) if shape[0] > shape[1] else 1
-                        nn.init.orthogonal_(x, gain=gain * scale)
-                    elif len(shape) == 3:
-                        gain = math.sqrt(shape[1] / shape[2]) if shape[1] > shape[2] else 1
-                        for i in range(shape[0]):
-                            nn.init.orthogonal_(x[i], gain=gain * scale)
+                    ratio_0_to_1 = self.layer_id / (self.n_layer - 1)  # 0 to 1
+                    ratio_1_to_almost0 = 1.0 - (self.layer_id / self.n_layer)  # 1 to ~0
+                    ddd = torch.ones(1, 1, self.n_embd)
+                    for i in range(self.n_embd):
+                        ddd[0, 0, i] = i / self.n_embd
+
+                    # fancy time_mix
+                    self.time_maa_x = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+                    self.time_maa_w = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+                    self.time_maa_k = nn.Parameter(1.0 - torch.pow(ddd, ratio_1_to_almost0))
+                    self.time_maa_v = nn.Parameter(1.0 - (torch.pow(ddd, ratio_1_to_almost0) + 0.3 * ratio_0_to_1))
+                    self.time_maa_r = nn.Parameter(1.0 - torch.pow(ddd, 0.5 * ratio_1_to_almost0))
+                    self.time_maa_g = nn.Parameter(1.0 - torch.pow(ddd, 0.5 * ratio_1_to_almost0))
+
+                    TIME_MIX_EXTRA_DIM = 32 # generate TIME_MIX for w,k,v,r,g
+                    self.time_maa_w1 = nn.Parameter(torch.zeros(self.n_embd, TIME_MIX_EXTRA_DIM*5).uniform_(-1e-4, 1e-4))
+                    self.time_maa_w2 = nn.Parameter(torch.zeros(5, TIME_MIX_EXTRA_DIM, self.n_embd).uniform_(-1e-4, 1e-4))
+
+                    D_AAA_LORA = 32
+                    self.time_aaa_w1 = nn.Parameter(torch.zeros(self.n_embd, D_AAA_LORA).uniform_(-1e-4, 1e-4))
+                    self.time_aaa_w2 = nn.Parameter(torch.zeros(D_AAA_LORA, self.n_embd).uniform_(-1e-4, 1e-4))
+
+                    D_KKK_LORA = 32
+                    self.time_kkk_w1 = nn.Parameter(torch.zeros(self.n_embd, D_KKK_LORA).uniform_(-1e-4, 1e-4))
+                    self.time_kkk_w2 = nn.Parameter(torch.zeros(D_KKK_LORA, self.n_embd).uniform_(-1e-4, 1e-4))
+
+                    # fancy time_decay
+                    decay_speed = torch.ones(self.attn_sz)
+                    for n in range(self.attn_sz):
+                        decay_speed[n] = -6 + 5 * (n / (self.attn_sz - 1)) ** (0.7 + 1.3 * ratio_0_to_1)
+                    self.time_decay = nn.Parameter(decay_speed.reshape(1,1,self.attn_sz))
+
+                    TIME_DECAY_EXTRA_DIM = 64
+                    self.time_decay_w1 = nn.Parameter(torch.zeros(self.n_embd, TIME_DECAY_EXTRA_DIM).uniform_(-1e-4, 1e-4))
+                    self.time_decay_w2 = nn.Parameter(torch.zeros(TIME_DECAY_EXTRA_DIM, self.attn_sz).uniform_(-1e-4, 1e-4))
+
+                    tmp = torch.zeros(self.attn_sz)
+                    for n in range(self.attn_sz):
+                        zigzag = ((n + 1) % 3 - 1) * 0.1
+                        tmp[n] = ratio_0_to_1 * (1 - (n / (self.attn_sz - 1))) + zigzag
+
+            else:
+                raise NotImplementedError
+
+        def jit_func(self, x, patch_resolution):
+            # Mix x with the previous timestep to produce xk, xv, xr
+            B, T, C = x.size()
+
+            xx = self.shift_func(x, self.shift_pixel, patch_resolution=patch_resolution, 
+                                with_cls_token=self.with_cls_token) - x
+            xxx = x + xx * self.time_maa_x  # [B, T, C]
+            xxx = torch.tanh(xxx @ self.time_maa_w1).view(B*T, 5, -1).transpose(0, 1)
+            # [5, B*T, TIME_MIX_EXTRA_DIM]
+            xxx = torch.bmm(xxx, self.time_maa_w2).view(5, B, T, -1)
+            # [5, B, T, C]
+            mw, mk, mv, mr, mg = xxx.unbind(dim=0)
+
+            xw = x + xx * (self.time_maa_w + mw)
+            xk = x + xx * (self.time_maa_k + mk)
+            xv = x + xx * (self.time_maa_v + mv)
+            xr = x + xx * (self.time_maa_r + mr)
+            xg = x + xx * (self.time_maa_g + mg)
+
+            r = self.receptance(xr)
+            k = self.key(xk)
+            v = self.value(xv)
+            g = F.silu(self.gate(xg))
+
+            a = k + torch.tanh(xk @ self.time_kkk_w1) @ self.time_kkk_w2
+            a = F.normalize(a.view(B,T,HEAD_SIZE,-1), dim=-1, p=2.0).view(B,T,C)
+
+            b = torch.sigmoid(self.time_aaaaa + (xw @ self.time_aaa_w1) @ self.time_aaa_w2)
+
+            ww = torch.tanh(xw @ self.time_decay_w1) @ self.time_decay_w2
+            # [B, T, C]
+            w = self.time_decay + ww
+
+            return r, k, v, g, w, a, b
+
+        def jit_func_2(self, x, g):
+            B, T, C = x.size()
+            x = x.view(B * T, C)
+            
+            x = self.ln_x(x).view(B, T, C)
+            x = self.output(x * g)
+            return x
+
+        def forward(self, x, patch_resolution=None):
+            def _inner_forward(x):
+                B, T, C = x.size()
+                self.device = x.device
+
+                r, k, v, g, w, a, b = self.jit_func(x, patch_resolution)
+                x = RUN_CUDA_RWKV7g(q=r, k=k, v=v, w=w, a=-a, b=a*b)
+                if self.key_norm is not None:
+                    x = self.key_norm(x)
+                return self.jit_func_2(x, g)
+            if self.with_cp and x.requires_grad:
+                x = cp.checkpoint(_inner_forward, x)
+            else:
+                x = _inner_forward(x)
+            return x
+
+
+    class VRWKV_ChannelMix(BaseModule):
+        def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
+                    shift_pixel=1, hidden_rate=4, init_mode='fancy', key_norm=False, 
+                    with_cls_token=False, with_cp=False):
+            super().__init__()
+            self.layer_id = layer_id
+            self.n_layer = n_layer
+            self.n_embd = n_embd
+            self.attn_sz = n_embd
+            self.n_head = n_head
+            self.head_size = self.attn_sz // self.n_head
+            assert self.head_size == HEAD_SIZE
+            self.with_cp = with_cp
+            self._init_weights(init_mode)
+            self.with_cls_token = with_cls_token
+            self.shift_pixel = shift_pixel
+            self.shift_mode = shift_mode
+            self.shift_func = eval(shift_mode)
+
+            hidden_sz = hidden_rate * n_embd
+            self.key = nn.Linear(n_embd, hidden_sz, bias=False)
+            if key_norm:
+                self.key_norm = nn.LayerNorm(hidden_sz)
+            else:
+                self.key_norm = None
+            self.receptance = nn.Linear(n_embd, n_embd, bias=False)
+            self.value = nn.Linear(hidden_sz, n_embd, bias=False)
+
+        def _init_weights(self, init_mode):
+            if init_mode == 'fancy':
+                with torch.no_grad(): # fancy init of time_mix
+                    ratio_1_to_almost0 = (1.0 - (self.layer_id / self.n_layer)) # 1 to ~0
+                    x = torch.ones(1, 1, self.n_embd)
+                    for i in range(self.n_embd):
+                        x[0, 0, i] = i / self.n_embd
+                    self.spatial_mix_k = nn.Parameter(torch.pow(x, ratio_1_to_almost0))
+                    self.spatial_mix_r = nn.Parameter(torch.pow(x, ratio_1_to_almost0))
+            else:
+                raise NotImplementedError
+
+        def forward(self, x, patch_resolution=None):
+            def _inner_forward(x):
+                xx = self.shift_func(x, self.shift_pixel, patch_resolution=patch_resolution,
+                                    with_cls_token=self.with_cls_token)
+                xk = x * self.spatial_mix_k + xx * (1 - self.spatial_mix_k)
+                xr = x * self.spatial_mix_r + xx * (1 - self.spatial_mix_r)
+
+                k = self.key(xk)
+                k = torch.square(torch.relu(k))
+                if self.key_norm is not None:
+                    k = self.key_norm(k)
+                kv = self.value(k)
+                x = torch.sigmoid(self.receptance(xr)) * kv
+                return x
+            if self.with_cp and x.requires_grad:
+                x = cp.checkpoint(_inner_forward, x)
+            else:
+                x = _inner_forward(x)
+            return x
+
+
+    class Block(BaseModule):
+        def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
+                    shift_pixel=1, drop_path=0., hidden_rate=4, init_mode='fancy',
+                    init_values=None, post_norm=False, key_norm=False, with_cls_token=False,
+                    with_cp=False):
+            super().__init__()
+            self.layer_id = layer_id
+            self.ln1 = nn.LayerNorm(n_embd)
+            self.ln2 = nn.LayerNorm(n_embd)
+            self.drop_path = nn.Dropout(drop_path) if drop_path > 0. else nn.Identity()
+            if self.layer_id == 0:
+                self.ln0 = nn.LayerNorm(n_embd)
+
+            self.att = VRWKV_SpatialMix_V6(n_embd, n_head, n_layer, layer_id, shift_mode,
+                                        shift_pixel, init_mode, key_norm=key_norm,
+                                        with_cls_token=with_cls_token)
+
+            self.ffn = VRWKV_ChannelMix(n_embd, n_head, n_layer, layer_id, shift_mode,
+                                        shift_pixel, hidden_rate, init_mode, key_norm=key_norm,
+                                        with_cls_token=with_cls_token)
+            self.layer_scale = (init_values is not None)
+            self.post_norm = post_norm
+            if self.layer_scale:
+                self.gamma1 = nn.Parameter(init_values * torch.ones((n_embd)), requires_grad=True)
+                self.gamma2 = nn.Parameter(init_values * torch.ones((n_embd)), requires_grad=True)
+            self.with_cp = with_cp
+
+        def forward(self, x, patch_resolution=None):
+            def _inner_forward(x):
+                if self.layer_id == 0:
+                    x = self.ln0(x)
+                if self.post_norm:
+                    if self.layer_scale:
+                        x = x + self.drop_path(self.gamma1 * self.ln1(self.att(x, patch_resolution)))
+                        x = x + self.drop_path(self.gamma2 * self.ln2(self.ffn(x, patch_resolution)))
                     else:
-                        assert False
-                    return x
+                        x = x + self.drop_path(self.ln1(self.att(x, patch_resolution)))
+                        x = x + self.drop_path(self.ln2(self.ffn(x, patch_resolution)))
+                else:
+                    if self.layer_scale:
+                        x = x + self.drop_path(self.gamma1 * self.att(self.ln1(x), patch_resolution))
+                        x = x + self.drop_path(self.gamma2 * self.ffn(self.ln2(x), patch_resolution))
+                    else:
+                        x = x + self.drop_path(self.att(self.ln1(x), patch_resolution))
+                        x = x + self.drop_path(self.ffn(self.ln2(x), patch_resolution))
+                return x
+            if self.with_cp and x.requires_grad:
+                x = cp.checkpoint(_inner_forward, x)
+            else:
+                x = _inner_forward(x)
+            return x
 
-            D_MIX_LORA = 28
-            self.time_maa_w1 = nn.Parameter(torch.zeros(n_embd, D_MIX_LORA*4))
-            self.time_maa_w2 = nn.Parameter(ortho_init(torch.zeros(4, D_MIX_LORA, n_embd), 0.1))
-
-            D_DECAY_LORA = 64
-            self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
-            self.time_decay_w2 = nn.Parameter(ortho_init(torch.zeros(D_DECAY_LORA, dim_att), 0.1))
-
-            D_AAA_LORA = 16
-            self.time_aaa_w1 = nn.Parameter(torch.zeros(n_embd, D_AAA_LORA))
-            self.time_aaa_w2 = nn.Parameter(ortho_init(torch.zeros(D_AAA_LORA, dim_att), 0.1))
-
-            D_KKK_LORA = 16
-            self.time_kkk_w1 = nn.Parameter(torch.zeros(n_embd, D_KKK_LORA))
-            self.time_kkk_w2 = nn.Parameter(ortho_init(torch.zeros(D_KKK_LORA, dim_att), 0.1))
-
-            D_GATE_LORA = 120
-            self.gate_w1 = nn.Parameter(torch.zeros(n_embd, D_GATE_LORA))
-            self.gate_w2 = nn.Parameter(ortho_init(torch.zeros(D_GATE_LORA, dim_att), 0.1))
-
-            D_MA_LORA = 16
-            self.ma_w1 = nn.Parameter(torch.zeros(n_embd, D_MA_LORA))
-            self.ma_w2 = nn.Parameter(ortho_init(torch.zeros(D_MA_LORA, dim_att), 0.1))
-            self.time_misc_a = nn.Parameter(torch.zeros(1,1,n_embd))
-            D_MK_LORA = 16
-            self.mk_w1 = nn.Parameter(torch.zeros(n_embd, D_MK_LORA))
-            self.mk_w2 = nn.Parameter(ortho_init(torch.zeros(D_MK_LORA, dim_att), 0.1))
-            self.time_misc_k = nn.Parameter(torch.zeros(1,1,n_embd))
-            if layer_id != 0:
-                D_MV_LORA = 16
-                self.mv_w1 = nn.Parameter(torch.zeros(n_embd, D_MV_LORA))
-                self.mv_w2 = nn.Parameter(ortho_init(torch.zeros(D_MV_LORA, dim_att), 0.1))
-                self.time_misc_v = nn.Parameter(torch.zeros(1,1,n_embd)+1.0)
-
-            self.time_shift = nn.ZeroPad2d((0, 0, 1, -1))
-            self.receptance = nn.Linear(n_embd, dim_att, bias=False)
-            self.key = nn.Linear(n_embd, dim_att, bias=False)
-            self.value = nn.Linear(n_embd, dim_att, bias=False)
-            self.output = nn.Linear(dim_att, n_embd, bias=False)
-            self.ln_x = nn.GroupNorm(self.n_head, dim_att, eps=6.4e-5)
-
-            self.receptance.weight.data.uniform_(-0.5/(self.n_embd**0.5), 0.5/(self.n_embd**0.5))
-            self.key.weight.data.uniform_(-0.05/(self.n_embd**0.5), 0.05/(self.n_embd**0.5))
-            self.value.weight.data.uniform_(-0.5/(self.n_embd**0.5), 0.5/(self.n_embd**0.5))
-            self.output.weight.data.zero_()
-
-    def forward(self, x, v1, res):
-        B, T, C = x.size()
-        H = self.n_head
-        xx = self.shift_func(x, self.shift_pixel, patch_resolution=res, 
-                             with_cls_token=self.with_cls_token) - x
-
-        xxx = x + xx * self.time_maa_x
-        xxx = torch.tanh(xxx @ self.time_maa_w1).view(B*T, 4, -1).transpose(0, 1)
-        xxx = torch.bmm(xxx, self.time_maa_w2).view(4, B, T, -1)
-        xrg, xwa, xk, xv = xxx.unbind(dim=0)
-
-        xrg = x + xx * (self.time_maa_rg + xrg)
-        xwa = x + xx * (self.time_maa_wa + xwa)
-        xk = x + xx * (self.time_maa_k + xk)
-        xv = x + xx * (self.time_maa_v + xv)
-
-        r = self.receptance(xrg)
-        w = -F.softplus(-(self.time_decay + torch.tanh(xwa @ self.time_decay_w1) @ self.time_decay_w2)) - 0.5
-        k = self.key(xk)
-        v = self.value(xv)
-        if self.layer_id == 0:
-            v1 = v
-        else:
-            v = v + (v1 - v) * torch.sigmoid(self.time_misc_v + (xv @ self.mv_w1) @ self.mv_w2)
-        g = torch.sigmoid(xrg @ self.gate_w1) @ self.gate_w2
-
-        kk = k + torch.tanh(xk @ self.time_kkk_w1) @ self.time_kkk_w2
-        kk = F.normalize(kk.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,C)
-        a = torch.sigmoid(self.time_aaaaa + (xwa @ self.time_aaa_w1) @ self.time_aaa_w2)
-
-        ma = torch.sigmoid(self.time_misc_a + (xwa @ self.ma_w1) @ self.ma_w2)
-        k = k * ma + k*a * (1 - ma)
-        mk = torch.sigmoid(self.time_misc_k + (xk @ self.mk_w1) @ self.mk_w2)
-        k = k * torch.clamp(w*mk, max=0).exp()
-
-        x = RUN_CUDA_RWKV7g(r.bfloat16(), w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16())
-        x = self.ln_x(x.view(B * T, C)).view(B, T, C)
-
-        x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.time_faaaa).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
-        x = self.output(x * g)
-        return x, v1
-    
-class MLP(nn.Module):
-
-    def __init__(self, n_embd):
-        super().__init__()
-        self.c_fc    = nn.Linear(n_embd, 7 * n_embd // 2, bias=False)
-        self.c_proj  = nn.Linear(7 * n_embd // 2, n_embd, bias=False)
-        self.c_proj.weight.data.zero_() # zero init suggested by @Grad62304977
-
-    def forward(self, x):
-        x = self.c_fc(x)
-        x = F.relu(x).square() # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
-        x = self.c_proj(x)
-        return x
-    
-class RWKV7Block(nn.Module):
-
-    def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
-                 shift_pixel=1, drop_path=0., hidden_rate=4, init_mode='fancy',
-                 init_values=None, post_norm=False, key_norm=False, with_cls_token=False,
-                 with_cp=False):
-        super().__init__()
-        self.attn = RWKV7(n_embd, n_head, n_layer, layer_id, shift_mode,
-                 shift_pixel, drop_path, hidden_rate, init_mode,
-                 init_values, post_norm, key_norm, with_cls_token,
-                 with_cp)
-        self.mlp = MLP(n_embd=n_embd)
-        self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
-        self.ln1 = nn.LayerNorm(n_embd)
-        self.ln2 = nn.LayerNorm(n_embd)
-
-    def forward(self, x, v1, x0, res):
-        x = self.lambdas[0] * x + self.lambdas[1] * x0
-        x1, v1 = self.attn(self.ln1(x), v1, res)
-        x = x + x1
-        x = x + self.mlp(self.ln2(x))
-        return x, v1
+    RWKV7Block = Block
 
 def resize_pos_embed(pos_embed,
                      src_shape,
@@ -525,10 +787,10 @@ class VRWKV7(BaseBackbone):
         x0 = x
 
         for i, layer in enumerate(self.layers):
-            if isinstance(layer, RWKV7Block):
-                x, v1 = layer(x, v1, x0, patch_resolution)
-            else:
-                x = layer(x, patch_resolution)
+            # if isinstance(layer, RWKV7Block):
+            #     x, v1 = layer(x, v1, x0, patch_resolution)
+            # else:
+            x = layer(x, patch_resolution)
             if i == len(self.layers) - 1 and self.final_norm:
                 x = self.ln1(x)
 
