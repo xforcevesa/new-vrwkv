@@ -787,10 +787,10 @@ class VRWKV7(BaseBackbone):
         x0 = x
 
         for i, layer in enumerate(self.layers):
-            # if isinstance(layer, RWKV7Block):
-            #     x, v1 = layer(x, v1, x0, patch_resolution)
-            # else:
-            x = layer(x, patch_resolution)
+            if use_classic_rwkv7:
+                x, v1 = layer(x, v1, x0, patch_resolution)
+            else:
+                x = layer(x, patch_resolution)
             if i == len(self.layers) - 1 and self.final_norm:
                 x = self.ln1(x)
 
