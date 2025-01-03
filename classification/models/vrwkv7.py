@@ -125,7 +125,7 @@ if wind_cuda:
         B,T,HC = q.shape
         dtype = q.dtype
         q,w,k,v,a,b = [seqlen_ceil_chunk(i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
-        return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,HC)[:, :T, :].to(dtype)
+        return WindRWKV7.apply(w,q,k,v,a,b)[:, :T, :].contiguous().view(B,T,HC).to(dtype)
 
 else:
     load(name="wind_backstepping", sources=[f'models/cuda_v7/backstepping_f32_{1 if HEAD_SIZE < 128 else 2}.cu', 'models/cuda_v7/backstepping_f32.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=CUDA_FLAGS+[f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}"])
@@ -301,18 +301,64 @@ class RWKV7(nn.Module):
         x = self.output(x * g)
         return x, v1
     
-class MLP(nn.Module):
-
-    def __init__(self, n_embd):
+class VRWKV_ChannelMix(BaseModule):
+    def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
+                 shift_pixel=1, hidden_rate=4, init_mode='fancy', key_norm=False, 
+                 with_cls_token=False, with_cp=False):
         super().__init__()
-        self.c_fc    = nn.Linear(n_embd, 7 * n_embd // 2, bias=False)
-        self.c_proj  = nn.Linear(7 * n_embd // 2, n_embd, bias=False)
-        self.c_proj.weight.data.zero_() # zero init suggested by @Grad62304977
+        self.layer_id = layer_id
+        self.n_layer = n_layer
+        self.n_embd = n_embd
+        self.attn_sz = n_embd
+        self.n_head = n_head
+        self.head_size = self.attn_sz // self.n_head
+        assert self.head_size == HEAD_SIZE
+        self.with_cp = with_cp
+        self._init_weights(init_mode)
+        self.with_cls_token = with_cls_token
+        self.shift_pixel = shift_pixel
+        self.shift_mode = shift_mode
+        self.shift_func = eval(shift_mode)
 
-    def forward(self, x):
-        x = self.c_fc(x)
-        x = F.relu(x).square() # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
-        x = self.c_proj(x)
+        hidden_sz = hidden_rate * n_embd
+        self.key = nn.Linear(n_embd, hidden_sz, bias=False)
+        if key_norm:
+            self.key_norm = nn.LayerNorm(hidden_sz)
+        else:
+            self.key_norm = None
+        self.receptance = nn.Linear(n_embd, n_embd, bias=False)
+        self.value = nn.Linear(hidden_sz, n_embd, bias=False)
+
+    def _init_weights(self, init_mode):
+        if init_mode == 'fancy':
+            with torch.no_grad(): # fancy init of time_mix
+                ratio_1_to_almost0 = (1.0 - (self.layer_id / self.n_layer)) # 1 to ~0
+                x = torch.ones(1, 1, self.n_embd)
+                for i in range(self.n_embd):
+                    x[0, 0, i] = i / self.n_embd
+                self.spatial_mix_k = nn.Parameter(torch.pow(x, ratio_1_to_almost0))
+                self.spatial_mix_r = nn.Parameter(torch.pow(x, ratio_1_to_almost0))
+        else:
+            raise NotImplementedError
+
+    def forward(self, x, patch_resolution=None):
+        def _inner_forward(x):
+            xx = self.shift_func(x, self.shift_pixel, patch_resolution=patch_resolution,
+                                 with_cls_token=self.with_cls_token)
+            xk = x * self.spatial_mix_k + xx * (1 - self.spatial_mix_k)
+            xr = x * self.spatial_mix_r + xx * (1 - self.spatial_mix_r)
+
+            k = self.key(xk)
+            k = torch.square(torch.relu(k))
+            if self.key_norm is not None:
+                k = self.key_norm(k)
+            kv = self.value(k)
+            x = torch.sigmoid(self.receptance(xr)) * kv
+            return x
+        if self.with_cp and x.requires_grad:
+            x = cp.checkpoint(_inner_forward, x)
+        else:
+            x = _inner_forward(x)
         return x
     
 class RWKV7Block(nn.Module):
@@ -326,7 +372,9 @@ class RWKV7Block(nn.Module):
                  shift_pixel, drop_path, hidden_rate, init_mode,
                  init_values, post_norm, key_norm, with_cls_token,
                  with_cp)
-        self.mlp = MLP(n_embd=n_embd)
+        self.mlp = VRWKV_ChannelMix(n_embd, n_head, n_layer, layer_id, shift_mode,
+                                    shift_pixel, hidden_rate, init_mode, key_norm=key_norm,
+                                    with_cls_token=with_cls_token)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
@@ -335,7 +383,7 @@ class RWKV7Block(nn.Module):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
         x1, v1 = self.attn(self.ln1(x), v1, res)
         x = x + x1
-        x = x + self.mlp(self.ln2(x))
+        x = x + self.mlp(self.ln2(x), res)
         return x, v1
 
 def resize_pos_embed(pos_embed,
