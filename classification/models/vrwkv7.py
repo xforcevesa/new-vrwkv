@@ -125,7 +125,7 @@ if wind_cuda:
         B,T,HC = q.shape
         dtype = q.dtype
         q,w,k,v,a,b = [seqlen_ceil_chunk(i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
-        return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,HC)[:, :T, :].to(dtype)
+        return WindRWKV7.apply(w,q,k,v,a,b)[:, :T, :].contiguous().view(B,T,HC).to(dtype)
 
 else:
     load(name="wind_backstepping", sources=[f'models/cuda_v7/backstepping_f32_{1 if HEAD_SIZE < 128 else 2}.cu', 'models/cuda_v7/backstepping_f32.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=CUDA_FLAGS+[f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}"])
