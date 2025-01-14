@@ -221,11 +221,11 @@ class RWKV7(nn.Module):
             self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
             self.time_decay_w2 = nn.Parameter(ortho_init(torch.zeros(D_DECAY_LORA, dim_att), 0.1))
 
-            D_AAA_LORA = 16
+            D_AAA_LORA = 24
             self.time_aaa_w1 = nn.Parameter(torch.zeros(n_embd, D_AAA_LORA))
             self.time_aaa_w2 = nn.Parameter(ortho_init(torch.zeros(D_AAA_LORA, dim_att), 0.1))
 
-            D_KKK_LORA = 16
+            D_KKK_LORA = 24
             self.time_kkk_w1 = nn.Parameter(torch.zeros(n_embd, D_KKK_LORA))
             self.time_kkk_w2 = nn.Parameter(ortho_init(torch.zeros(D_KKK_LORA, dim_att), 0.1))
 
@@ -233,16 +233,16 @@ class RWKV7(nn.Module):
             self.gate_w1 = nn.Parameter(torch.zeros(n_embd, D_GATE_LORA))
             self.gate_w2 = nn.Parameter(ortho_init(torch.zeros(D_GATE_LORA, dim_att), 0.1))
 
-            D_MA_LORA = 16
+            D_MA_LORA = 24
             self.ma_w1 = nn.Parameter(torch.zeros(n_embd, D_MA_LORA))
             self.ma_w2 = nn.Parameter(ortho_init(torch.zeros(D_MA_LORA, dim_att), 0.1))
             self.time_misc_a = nn.Parameter(torch.zeros(1,1,n_embd))
-            D_MK_LORA = 16
+            D_MK_LORA = 24
             self.mk_w1 = nn.Parameter(torch.zeros(n_embd, D_MK_LORA))
             self.mk_w2 = nn.Parameter(ortho_init(torch.zeros(D_MK_LORA, dim_att), 0.1))
             self.time_misc_k = nn.Parameter(torch.zeros(1,1,n_embd))
             if layer_id != 0:
-                D_MV_LORA = 16
+                D_MV_LORA = 24
                 self.mv_w1 = nn.Parameter(torch.zeros(n_embd, D_MV_LORA))
                 self.mv_w2 = nn.Parameter(ortho_init(torch.zeros(D_MV_LORA, dim_att), 0.1))
                 self.time_misc_v = nn.Parameter(torch.zeros(1,1,n_embd)+1.0)
@@ -294,7 +294,23 @@ class RWKV7(nn.Module):
         mk = torch.sigmoid(self.time_misc_k + (xk @ self.mk_w1) @ self.mk_w2)
         k = k * torch.clamp(w*mk, max=0).exp()
 
-        x = RUN_CUDA_RWKV7g(r.bfloat16(), w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16())
+        r_, w_, k_, v_, a_, b_ = r.bfloat16(), w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16()
+
+        seqlen_is_even = T % 2 == 0
+        seqlen_half = T // 2
+
+        r_a, r_b = r_[:, :seqlen_half, :], torch.flip(r_[:, -seqlen_half:, :], dims=[1])
+        w_a, w_b = w_[:, :seqlen_half, :], torch.flip(w_[:, -seqlen_half:, :], dims=[1])
+        k_a, k_b = k_[:, :seqlen_half, :], torch.flip(k_[:, -seqlen_half:, :], dims=[1])
+        v_a, v_b = v_[:, :seqlen_half, :], torch.flip(v_[:, -seqlen_half:, :], dims=[1])
+        a_a, a_b = a_[:, :seqlen_half, :], torch.flip(a_[:, -seqlen_half:, :], dims=[1])
+        b_a, b_b = b_[:, :seqlen_half, :], torch.flip(b_[:, -seqlen_half:, :], dims=[1])
+
+        x_a = RUN_CUDA_RWKV7g(r_a, w_a, k_a, v_a, a_a, b_a)
+        x_b = RUN_CUDA_RWKV7g(r_b, w_b, k_b, v_b, a_b, b_b)
+        x_b = torch.flip(x_b, dims=[1])
+        x = torch.concatenate([x_a, x_b] if seqlen_is_even else [x_a, x[:, seqlen_half:-seqlen_half, :], x_b], dim=1)
+
         x = self.ln_x(x.view(B * T, C)).view(B, T, C)
 
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.time_faaaa).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
