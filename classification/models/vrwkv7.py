@@ -254,12 +254,72 @@ class RWKV7(nn.Module):
             self.output = nn.Linear(dim_att, n_embd, bias=False)
             self.ln_x = nn.GroupNorm(self.n_head, dim_att, eps=6.4e-5)
 
+            self.x_w = nn.ParameterList([
+                nn.Parameter(torch.ones(1, 1, dim_att)),
+                nn.Parameter(torch.zeros(1, 1, dim_att)),
+                nn.Parameter(torch.zeros(1, 1, dim_att)),
+                nn.Parameter(torch.zeros(1, 1, dim_att)),
+                nn.Parameter(torch.zeros(1, 1, dim_att))
+            ])
+
+            self.xrg_w = nn.ParameterList([
+                nn.Parameter(torch.ones(1, 1, dim_att)),
+                nn.Parameter(torch.zeros(1, 1, dim_att)),
+                nn.Parameter(torch.zeros(1, 1, dim_att)),
+                nn.Parameter(torch.zeros(1, 1, dim_att))
+            ])
+
+            self.is_last_layer = n_layer == (layer_id + 1)
+
+            if not self.is_last_layer:
+                self.v1_w = nn.ParameterList([
+                    nn.Parameter(torch.ones(1, 1, dim_att)),
+                    nn.Parameter(torch.zeros(1, 1, dim_att)),
+                    nn.Parameter(torch.zeros(1, 1, dim_att)),
+                    nn.Parameter(torch.zeros(1, 1, dim_att))
+                ])
+
             self.receptance.weight.data.uniform_(-0.5/(self.n_embd**0.5), 0.5/(self.n_embd**0.5))
             self.key.weight.data.uniform_(-0.05/(self.n_embd**0.5), 0.05/(self.n_embd**0.5))
             self.value.weight.data.uniform_(-0.5/(self.n_embd**0.5), 0.5/(self.n_embd**0.5))
             self.output.weight.data.zero_()
 
     def forward(self, x, v1, res):
+        res_t = (res[1], res[0])
+
+        v1_a = v1
+        v1_b = torch.flip(v1_a, dims=[1]) if v1_a is not None else None
+        v1_c = rearrange(v1_a, 'b (h w) c -> b (w h) c', h=res[0]) if v1_a is not None else None
+        v1_d = torch.flip(v1_c, dims=[1]) if v1_c is not None else None
+
+        x_a = x
+        x_b = torch.flip(x_a, dims=[1])
+        x_c = rearrange(x_a, 'b (h w) c -> b (w h) c', h=res[0])
+        x_d = torch.flip(x_c, dims=[1])
+
+        x_a, xrg_a, v1_a = self._forward(x_a, v1_a, res)
+        x_b, xrg_b, v1_b = self._forward(x_b, v1_b, res)
+        x_c, xrg_c, v1_c = self._forward(x_c, v1_c, res_t)
+        x_d, xrg_d, v1_d = self._forward(x_d, v1_d, res_t)
+
+        v1_b = torch.flip(v1_b, dims=[1])
+        v1_c = rearrange(v1_c, 'b (w h) c -> b (h w) c', h=res[0])
+        v1_d = rearrange(torch.flip(v1_d, dims=[1]), 'b (w h) c -> b (h w) c', h=res[0])
+
+        x_b = torch.flip(x_b, dims=[1])
+        x_c = rearrange(x_c, 'b (w h) c -> b (h w) c', h=res[0])
+        x_d = rearrange(torch.flip(x_d, dims=[1]), 'b (w h) c -> b (h w) c', h=res[0])
+
+        x = x_a * self.x_w[0] + x_b * self.x_w[1] + x_c * self.x_w[2] + x_d * self.x_w[3] + x * self.x_w[4]
+        if not self.is_last_layer:
+            v1 = v1_a * self.v1_w[0] + v1_b * self.v1_w[1] + v1_c * self.v1_w[2] + v1_d * self.v1_w[3]
+        xrg = xrg_a * self.xrg_w[0] + xrg_b * self.xrg_w[1] + xrg_c * self.xrg_w[2] + xrg_d * self.xrg_w[3]
+
+        g = torch.sigmoid(xrg @ self.gate_w1) @ self.gate_w2
+        x = self.output(x * g)
+        return x, v1
+
+    def _forward(self, x, v1, res):
         B, T, C = x.size()
         H = self.n_head
         xx = self.shift_func(x, self.shift_pixel, patch_resolution=res, 
@@ -283,7 +343,7 @@ class RWKV7(nn.Module):
             v1 = v
         else:
             v = v + (v1 - v) * torch.sigmoid(self.time_misc_v + (xv @ self.mv_w1) @ self.mv_w2)
-        g = torch.sigmoid(xrg @ self.gate_w1) @ self.gate_w2
+        # g = torch.sigmoid(xrg @ self.gate_w1) @ self.gate_w2
 
         kk = k + torch.tanh(xk @ self.time_kkk_w1) @ self.time_kkk_w2
         kk = F.normalize(kk.view(B,T,H,-1), dim=-1, p=2.0).view(B,T,C)
@@ -298,8 +358,8 @@ class RWKV7(nn.Module):
         x = self.ln_x(x.view(B * T, C)).view(B, T, C)
 
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.time_faaaa).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
-        x = self.output(x * g)
-        return x, v1
+        # x = self.output(x * g)
+        return x, xrg, v1
     
 class VRWKV_ChannelMix(BaseModule):
     def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
