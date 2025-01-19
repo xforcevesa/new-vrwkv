@@ -10,7 +10,13 @@ import torch.nn as nn
 from torch.nn import functional as F
 import torch.utils.checkpoint as cp
 
+SCAN_FORWARD = 0
+SCAN_BACKWARD = 1
+SCAN_UPWARD = 2
+SCAN_DOWNWARD = 3
+
 from einops import rearrange
+from einops.layers.torch import Rearrange
 
 # from mmcv.runner.base_module import BaseModule, ModuleList
 from mmcv.cnn.bricks.transformer import PatchEmbed
@@ -221,11 +227,11 @@ class RWKV7(nn.Module):
             self.time_decay_w1 = nn.Parameter(torch.zeros(n_embd, D_DECAY_LORA))
             self.time_decay_w2 = nn.Parameter(ortho_init(torch.zeros(D_DECAY_LORA, dim_att), 0.1))
 
-            D_AAA_LORA = 16
+            D_AAA_LORA = 24
             self.time_aaa_w1 = nn.Parameter(torch.zeros(n_embd, D_AAA_LORA))
             self.time_aaa_w2 = nn.Parameter(ortho_init(torch.zeros(D_AAA_LORA, dim_att), 0.1))
 
-            D_KKK_LORA = 16
+            D_KKK_LORA = 24
             self.time_kkk_w1 = nn.Parameter(torch.zeros(n_embd, D_KKK_LORA))
             self.time_kkk_w2 = nn.Parameter(ortho_init(torch.zeros(D_KKK_LORA, dim_att), 0.1))
 
@@ -233,16 +239,16 @@ class RWKV7(nn.Module):
             self.gate_w1 = nn.Parameter(torch.zeros(n_embd, D_GATE_LORA))
             self.gate_w2 = nn.Parameter(ortho_init(torch.zeros(D_GATE_LORA, dim_att), 0.1))
 
-            D_MA_LORA = 16
+            D_MA_LORA = 24
             self.ma_w1 = nn.Parameter(torch.zeros(n_embd, D_MA_LORA))
             self.ma_w2 = nn.Parameter(ortho_init(torch.zeros(D_MA_LORA, dim_att), 0.1))
             self.time_misc_a = nn.Parameter(torch.zeros(1,1,n_embd))
-            D_MK_LORA = 16
+            D_MK_LORA = 24
             self.mk_w1 = nn.Parameter(torch.zeros(n_embd, D_MK_LORA))
             self.mk_w2 = nn.Parameter(ortho_init(torch.zeros(D_MK_LORA, dim_att), 0.1))
             self.time_misc_k = nn.Parameter(torch.zeros(1,1,n_embd))
             if layer_id != 0:
-                D_MV_LORA = 16
+                D_MV_LORA = 24
                 self.mv_w1 = nn.Parameter(torch.zeros(n_embd, D_MV_LORA))
                 self.mv_w2 = nn.Parameter(ortho_init(torch.zeros(D_MV_LORA, dim_att), 0.1))
                 self.time_misc_v = nn.Parameter(torch.zeros(1,1,n_embd)+1.0)
@@ -259,7 +265,29 @@ class RWKV7(nn.Module):
             self.value.weight.data.uniform_(-0.5/(self.n_embd**0.5), 0.5/(self.n_embd**0.5))
             self.output.weight.data.zero_()
 
-    def forward(self, x, v1, res):
+            self.n_layer = n_layer
+
+    def forward(self, x, v1, res, scan):
+        scan = scan[self.layer_id % len(scan)]
+        trans = Rearrange('b (h w) c -> b (w h) c', h=res[0])
+        restore = Rearrange('b (w h) c -> b (h w) c', h=res[0])
+        if scan == SCAN_FORWARD:
+            x, v1 = self._forward(x, v1, res)
+        elif scan == SCAN_BACKWARD:
+            x, v1 = torch.flip(x, dims=[1]), torch.flip(v1, dims=[1])
+            x, v1 = self._forward(x, v1, res)
+            x, v1 = torch.flip(x, dims=[1]), torch.flip(v1, dims=[1])
+        elif scan == SCAN_DOWNWARD:
+            x, v1 = trans(x), trans(v1)
+            x, v1 = self._forward(x, v1, res)
+            x, v1 = restore(x), restore(v1)
+        elif scan == SCAN_UPWARD:
+            x, v1 = torch.flip(trans(x), dims=[1]), torch.flip(trans(v1), dims=[1])
+            x, v1 = self._forward(x, v1, res)
+            x, v1 = restore(torch.flip(x, dims=[1])), restore(torch.flip(v1, dims=[1]))
+        return x, v1
+
+    def _forward(self, x, v1, res):
         B, T, C = x.size()
         H = self.n_head
         xx = self.shift_func(x, self.shift_pixel, patch_resolution=res, 
@@ -379,9 +407,9 @@ class RWKV7Block(nn.Module):
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
 
-    def forward(self, x, v1, x0, res):
+    def forward(self, x, v1, x0, res, scan):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
-        x1, v1 = self.attn(self.ln1(x), v1, res)
+        x1, v1 = self.attn(self.ln1(x), v1, res, scan)
         x = x + x1
         x = x + self.mlp(self.ln2(x), res)
         return x, v1
@@ -494,6 +522,13 @@ class VRWKV7(BaseBackbone):
             stride=patch_size,
             bias=True)
         
+        self.scan_method = [
+            SCAN_FORWARD,
+            SCAN_BACKWARD,
+            SCAN_UPWARD,
+            SCAN_DOWNWARD
+        ]
+        
         self.patch_resolution = self.patch_embed.init_out_size
         num_patches = self.patch_resolution[0] * self.patch_resolution[1]
 
@@ -574,7 +609,7 @@ class VRWKV7(BaseBackbone):
 
         for i, layer in enumerate(self.layers):
             if isinstance(layer, RWKV7Block):
-                x, v1 = layer(x, v1, x0, patch_resolution)
+                x, v1 = layer(x, v1, x0, patch_resolution, self.scan_method)
             else:
                 x = layer(x, patch_resolution)
             if i == len(self.layers) - 1 and self.final_norm:

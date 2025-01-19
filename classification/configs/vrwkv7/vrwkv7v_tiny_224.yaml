@@ -15,3 +15,8 @@ MODEL:
     DOWNSAMPLE: "v3"
     PATCHEMBED: "v2"
     NORM_LAYER: "ln2d"
+TRAIN:
+  BASE_LR: 4e-4
+  MIN_LR: 2e-5
+  WARMUP_LR: 2e-5
+  WARMUP_EPOCHS: 1

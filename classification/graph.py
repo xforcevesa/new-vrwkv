@@ -24,9 +24,10 @@ def process_logfile(filename: str, name: str):
 def main():
     # process_logfile(filename="log.txt.4", name="Original")
     # process_logfile(filename="log.txt.5", name="v7 Uni-Shift")
-    process_logfile(filename="log.txt.6", name="v6")
-    process_logfile(filename="tmp/vrwkv7_tiny_0230s.1/20241231112311/log_rank0.txt", name="v7")
+    # process_logfile(filename="log.txt.6", name="v6")
+    process_logfile(filename="log.txt.9", name="v7 Best")
     process_logfile(filename="log.txt.7", name="v7 Enhanced")
+    process_logfile(filename="log.txt.8", name="v6 Enhanced")
     plt.legend()
     plt.xlabel("Iterations")
     plt.ylabel("Accuracy (%)")
