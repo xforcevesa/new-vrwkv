@@ -22,6 +22,8 @@ def process_logfile(filename: str, name: str):
 
 
 def main():
+    plt.figure(figsize=(10, 8))
+
     # process_logfile(filename="log.txt.4", name="Original")
     # process_logfile(filename="log.txt.5", name="v7 Uni-Shift")
     # process_logfile(filename="log.txt.6", name="v6")

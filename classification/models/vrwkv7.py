@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import torch.utils.checkpoint as cp
+import random
 
 SCAN_FORWARD = 0
 SCAN_BACKWARD = 1
@@ -274,15 +275,15 @@ class RWKV7(nn.Module):
         if scan == SCAN_FORWARD:
             x, v1 = self._forward(x, v1, res)
         elif scan == SCAN_BACKWARD:
-            x, v1 = torch.flip(x, dims=[1]), torch.flip(v1, dims=[1])
+            x, v1 = torch.flip(x, dims=[1]), torch.flip(v1, dims=[1]) if v1 is not None else None
             x, v1 = self._forward(x, v1, res)
             x, v1 = torch.flip(x, dims=[1]), torch.flip(v1, dims=[1])
         elif scan == SCAN_DOWNWARD:
-            x, v1 = trans(x), trans(v1)
+            x, v1 = trans(x), trans(v1) if v1 is not None else None
             x, v1 = self._forward(x, v1, res)
             x, v1 = restore(x), restore(v1)
         elif scan == SCAN_UPWARD:
-            x, v1 = torch.flip(trans(x), dims=[1]), torch.flip(trans(v1), dims=[1])
+            x, v1 = torch.flip(trans(x), dims=[1]), torch.flip(trans(v1), dims=[1]) if v1 is not None else None
             x, v1 = self._forward(x, v1, res)
             x, v1 = restore(torch.flip(x, dims=[1])), restore(torch.flip(v1, dims=[1]))
         return x, v1
@@ -591,6 +592,8 @@ class VRWKV7(BaseBackbone):
     def forward(self, x):
         B = x.shape[0]
         x, patch_resolution = self.patch_embed(x)
+
+        random.shuffle(self.scan_method)
 
         x = x + resize_pos_embed(
             self.pos_embed,
