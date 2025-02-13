@@ -422,7 +422,6 @@ class VRWKV6(BaseBackbone):
                 #  out_indices=-1,
                  drop_rate=0.,
                  embed_dims=192,
-                 num_heads=3,
                  depth=12,
                  drop_path_rate=0.,
                  shift_pixel=1,
@@ -445,6 +444,9 @@ class VRWKV6(BaseBackbone):
         self.num_extra_tokens = 0
         self.num_layers = len(depth)
         self.drop_path_rate = drop_path_rate
+
+        num_heads = embed_dims // HEAD_SIZE
+
         # if isinstance(dims, int):
         #     dims = [int(dims * 2 ** i_layer) for i_layer in range(self.num_layers)]
         # self.num_features = dims[-1]

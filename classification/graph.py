@@ -28,6 +28,7 @@ def main():
     # process_logfile(filename="log.txt.5", name="v7 Uni-Shift")
     # process_logfile(filename="log.txt.6", name="v6")
     process_logfile(filename="log.txt.9", name="v7 Best")
+    process_logfile(filename="log.txt.10", name="v6 Best")
     process_logfile(filename="log.txt.7", name="v7 Enhanced")
     process_logfile(filename="log.txt.8", name="v6 Enhanced")
     plt.legend()

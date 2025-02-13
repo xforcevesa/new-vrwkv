@@ -341,6 +341,7 @@ class VRWKV_ChannelMix(BaseModule):
         self.attn_sz = n_embd
         self.n_head = n_head
         self.head_size = self.attn_sz // self.n_head
+        print(f'{self.attn_sz = }, {self.n_head = }')
         assert self.head_size == HEAD_SIZE
         self.with_cp = with_cp
         self._init_weights(init_mode)
@@ -470,7 +471,6 @@ class VRWKV7(BaseBackbone):
                 #  out_indices=-1,
                  drop_rate=0.,
                  embed_dims=192,
-                 num_heads=3,
                  depth=12,
                  drop_path_rate=0.,
                  shift_pixel=1,
@@ -493,6 +493,9 @@ class VRWKV7(BaseBackbone):
         self.num_extra_tokens = 0
         self.num_layers = len(depth)
         self.drop_path_rate = drop_path_rate
+
+        num_heads = embed_dims // HEAD_SIZE
+
         # if isinstance(dims, int):
         #     dims = [int(dims * 2 ** i_layer) for i_layer in range(self.num_layers)]
         # self.num_features = dims[-1]
@@ -593,7 +596,7 @@ class VRWKV7(BaseBackbone):
         B = x.shape[0]
         x, patch_resolution = self.patch_embed(x)
 
-        random.shuffle(self.scan_method)
+        # self.scan_method = list(reversed(self.scan_method))
 
         x = x + resize_pos_embed(
             self.pos_embed,
