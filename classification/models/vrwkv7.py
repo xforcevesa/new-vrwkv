@@ -280,11 +280,11 @@ class RWKV7(nn.Module):
             x, v1 = torch.flip(x, dims=[1]), torch.flip(v1, dims=[1])
         elif scan == SCAN_DOWNWARD:
             x, v1 = trans(x), trans(v1) if v1 is not None else None
-            x, v1 = self._forward(x, v1, res)
+            x, v1 = self._forward(x, v1, (res[1], res[0]))
             x, v1 = restore(x), restore(v1)
         elif scan == SCAN_UPWARD:
             x, v1 = torch.flip(trans(x), dims=[1]), torch.flip(trans(v1), dims=[1]) if v1 is not None else None
-            x, v1 = self._forward(x, v1, res)
+            x, v1 = self._forward(x, v1, (res[1], res[0]))
             x, v1 = restore(torch.flip(x, dims=[1])), restore(torch.flip(v1, dims=[1]))
         return x, v1
 
