@@ -1,8 +1,6 @@
 # Vision RWKV (New Generation)
 
-New structure for `vrwkv6` model is ready in classification, fully based on the `VMamba` project.
-
-While `vrwkv7` is in progress, awaiting for further testing...
+New structure for `vrwkv6` and `vrwkv7` model is ready in classification, fully based on the `VMamba` project. However, `vrwkv7` distillation from `DINOv2` is in progress, awaiting for further testing. View the synopsis in the [distill_classification](./distill_classification/README.md)
 
 We'll also add other models for contrastive experiments.
 

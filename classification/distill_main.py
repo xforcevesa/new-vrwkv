@@ -36,6 +36,9 @@ from fvcore.nn import FlopCountAnalysis, flop_count_str, flop_count
 
 from timm.utils import ModelEma as ModelEma
 
+import os
+os.environ['HF_ENDPOINT']='https://hf-mirror.com'
+
 if torch.multiprocessing.get_start_method() != "spawn":
     print(f"||{torch.multiprocessing.get_start_method()}||", end="")
     torch.multiprocessing.set_start_method("spawn", force=True)

@@ -1,4 +1,4 @@
-from transformers import BitImageProcessor, AutoModelForImageClassification
+from transformers import BitImageProcessor, Dinov2ForImageClassification
 from PIL import Image
 import requests
 
@@ -34,10 +34,10 @@ config = {
 }
 
 processor = BitImageProcessor(**config)
-model = AutoModelForImageClassification.from_pretrained('facebook/dinov2-large-imagenet1k-1-layer')
+model = Dinov2ForImageClassification.from_pretrained('facebook/dinov2-large-imagenet1k-1-layer')
 
 inputs = processor(images=image, return_tensors="pt")
-print(inputs['pixel_values'].shape, inputs['pixel_values'].mean(), inputs['pixel_values'].std())
+print(inputs['pixel_values'], inputs['pixel_values'].mean(), inputs['pixel_values'].std())
 outputs = model(**inputs)
 logits = outputs.logits
 predicted_class_idx = logits.argmax(-1).item()
