@@ -10,6 +10,10 @@ See classification [here](./classification/readme.md).
 
 ## Issue
 
+This issue is well addressed with much better performance and efficiency. Thanks to the help of [wind_rwkv](https://github.com/johanwind/wind_rwkv/) very much!
+
+Original issue:
+
 The wind_rwkv7 CUDA implementation may cause SIGABRT, with `dmesg` log like this:
 
 ```dmesg

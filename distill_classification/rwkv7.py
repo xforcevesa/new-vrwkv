@@ -12,6 +12,8 @@ SCAN_DOWNWARD = 3
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
+from wind_rwkv.rwkv7 import attn, load_attn
+
 T_MAX = 10000
 HEAD_SIZE = 32
 
@@ -30,105 +32,6 @@ def seqlen_ceil_chunk(x: torch.Tensor):
         x = torch.concat([x, concat_tensor], dim=1)
     return x
 
-from torch.utils.cpp_extension import load
-CUDA_FLAGS = ["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization"]
-
-# Set wind_cuda to True to reproduce the crash
-wind_cuda = False
-
-def q_shift_multihead(input, shift_pixel=1, head_dim=HEAD_SIZE, 
-                      patch_resolution=None, with_cls_token=False):
-    B, N, C = input.shape
-    assert C % head_dim == 0
-    assert head_dim % 4 == 0
-    if with_cls_token:
-        cls_tokens = input[:, [-1], :]
-        input = input[:, :-1, :]
-    input = input.transpose(1, 2).reshape(
-        B, -1, head_dim, patch_resolution[0], patch_resolution[1])  # [B, n_head, head_dim H, W]
-    B, _, _, H, W = input.shape
-    output = torch.zeros_like(input)
-    output[:, :, 0:int(head_dim*1/4), :, shift_pixel:W] = \
-        input[:, :, 0:int(head_dim*1/4), :, 0:W-shift_pixel]
-    output[:, :, int(head_dim/4):int(head_dim/2), :, 0:W-shift_pixel] = \
-        input[:, :, int(head_dim/4):int(head_dim/2), :, shift_pixel:W]
-    output[:, :, int(head_dim/2):int(head_dim/4*3), shift_pixel:H, :] = \
-        input[:, :, int(head_dim/2):int(head_dim/4*3), 0:H-shift_pixel, :]
-    output[:, :, int(head_dim*3/4):int(head_dim), 0:H-shift_pixel, :] = \
-        input[:, :, int(head_dim*3/4):int(head_dim), shift_pixel:H, :]
-    if with_cls_token:
-        output = output.reshape(B, C, N-1).transpose(1, 2)
-        output = torch.cat((output, cls_tokens), dim=1)
-    else:
-        output = output.reshape(B, C, N).transpose(1, 2)
-    return output
-
-if wind_cuda:
-    # This code may cause SIGABRT on NVIDIA H800 & CUDA 12.5
-    load(name="wind", sources=['cuda_v7/wind_rwkv7.cu', 'cuda_v7/wind_rwkv7.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=CUDA_FLAGS+[f'-D_C_={HEAD_SIZE}'])
-
-    class WindRWKV7(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx,w,q,k,v,a,b):
-            B,T,H,C = w.shape
-            s0 = torch.zeros(B,H,C,C,dtype=w.dtype,device=w.device)
-            assert T%16 == 0
-            assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,a,b,s0])
-            w,q,k,v,a,b,s0 = [i.contiguous() for i in [w,q,k,v,a,b,s0]]
-            y = torch.empty_like(v)
-            sT = torch.empty_like(s0)
-            s = torch.zeros(B,H,T//16,C,C, dtype=w.dtype,device=w.device)
-            torch.ops.wind.forward(w,q,k,v,a,b, s0,y,s,sT)
-            ctx.save_for_backward(w,q,k,v,a,b,s)
-            return y
-        
-        @staticmethod
-        def backward(ctx,dy):
-            w,q,k,v,a,b,s = ctx.saved_tensors
-            B,T,H,C = w.shape
-            dsT = torch.zeros(B,H,C,C,dtype=dy.dtype,device=dy.device)
-            assert all(i.dtype==torch.bfloat16 for i in [dy])
-            dy,dsT = [i.contiguous() for i in [dy,dsT]]
-            dw,dq,dk,dv,da,db,ds0 = [torch.empty_like(x) for x in [w,q,k,v,a,b,dsT]]
-            torch.ops.wind.backward(w,q,k,v,a,b, dy,s,dsT, dw,dq,dk,dv,da,db,ds0)
-            return dw,dq,dk,dv,da,db
-    
-    def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
-        B,T,HC = q.shape
-        dtype = q.dtype
-        q,w,k,v,a,b = [seqlen_ceil_chunk(i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
-        return WindRWKV7.apply(w,q,k,v,a,b).view(B,T,HC)[:, :T, :].to(dtype)
-
-else:
-    load(name="wind_backstepping", sources=[f'cuda_v7/backstepping_f32_{1 if HEAD_SIZE < 128 else 2}.cu', 'cuda_v7/backstepping_f32.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=CUDA_FLAGS+[f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}"])
-
-    class WindBackstepping(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, w,q,k,v,z,b):
-            B,T,H,C = w.shape 
-            assert T%CHUNK_LEN == 0
-            assert all(i.dtype==torch.bfloat16 for i in [w,q,k,v,z,b])
-            w,q,k,v,z,b = [i.contiguous() for i in [w,q,k,v,z,b]]
-            y = torch.empty_like(v)
-            s = torch.empty(B,H,T//CHUNK_LEN,C,C, dtype=torch.float32,device=w.device)
-            sa = torch.empty(B,T,H,C, dtype=torch.float32,device=w.device)
-            torch.ops.wind_backstepping.forward(w,q,k,v,z,b, y,s,sa)
-            ctx.save_for_backward(w,q,k,v,z,b,s,sa)
-            return y
-        @staticmethod
-        def backward(ctx, dy):
-            assert dy.dtype == torch.bfloat16
-            dy = dy.contiguous()
-            w,q,k,v,z,b,s,sa = ctx.saved_tensors
-            dw,dq,dk,dv,dz,db = [torch.empty_like(x) for x in [w,q,k,v,z,b]]
-            torch.ops.wind_backstepping.backward(w,q,k,v,z,b, dy,s,sa, dw,dq,dk,dv,dz,db)
-            return dw,dq,dk,dv,dz,db
-
-    def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
-        B,T,HC = q.shape
-        dtype = q.dtype
-        q,w,k,v,a,b = [seqlen_ceil_chunk(i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
-        return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)[:, :T, :].to(dtype)
 
 class RWKV7(nn.Module):
     def __init__(self, dim, n_layer, layer_id, shift_mode='q_shift_multihead',
@@ -144,6 +47,8 @@ class RWKV7(nn.Module):
         self.head_size = HEAD_SIZE
         self.n_head = dim_att // self.head_size
         assert dim_att % self.n_head == 0
+
+        load_attn(HEAD_SIZE=HEAD_SIZE)
 
         # self.shift_func = eval(shift_mode)
         self.with_cls_token = with_cls_token
@@ -234,6 +139,7 @@ class RWKV7(nn.Module):
 
             self.n_layer = n_layer
 
+    @torch.compile
     def forward(self, x, v1, res=None, scan=[SCAN_FORWARD, SCAN_BACKWARD]):
         scan = scan[self.layer_id % len(scan)]
         # trans = Rearrange('b (h w) c -> b (w h) c', h=res[0])
@@ -288,7 +194,7 @@ class RWKV7(nn.Module):
         mk = torch.sigmoid(self.time_misc_k + (xk @ self.mk_w1) @ self.mk_w2)
         k = k * torch.clamp(w*mk, max=0).exp()
 
-        x = RUN_CUDA_RWKV7g(r.bfloat16(), w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16())
+        x = attn(r.bfloat16(), w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16(), HEAD_SIZE=HEAD_SIZE)
         x = self.ln_x(x.view(B * T, C)).view(B, T, C)
 
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.time_faaaa).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)

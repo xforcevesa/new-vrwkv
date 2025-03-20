@@ -69,6 +69,7 @@ from torch.utils.cpp_extension import load
 CUDA_FLAGS = ["-res-usage", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization"]
 
 # Set wind_cuda to True to reproduce the crash
+# The issue is addressed. Feel free to use it. View Line 185.
 wind_cuda = False
 
 def q_shift_multihead(input, shift_pixel=1, head_dim=HEAD_SIZE, 
@@ -128,6 +129,7 @@ if wind_cuda:
             torch.ops.wind.backward(w,q,k,v,a,b, dy,s,dsT, dw,dq,dk,dv,da,db,ds0)
             return dw,dq,dk,dv,da,db
     
+    # Old RWKV7
     def RUN_CUDA_RWKV7g(q,w,k,v,a,b):
         B,T,HC = q.shape
         dtype = q.dtype
@@ -165,6 +167,8 @@ else:
         q,w,k,v,a,b = [seqlen_ceil_chunk(i.view(B,T,HC//HEAD_SIZE,HEAD_SIZE)) for i in [q,w,k,v,a,b]]
         return WindBackstepping.apply(w,q,k,v,a,b).view(B,T,HC)[:, :T, :].to(dtype)
 
+from wind_rwkv.rwkv7 import attn, load_attn
+
 class RWKV7(nn.Module):
     def __init__(self, n_embd, n_head, n_layer, layer_id, shift_mode='q_shift_multihead',
                  shift_pixel=1, drop_path=0., hidden_rate=4, init_mode='fancy',
@@ -174,6 +178,11 @@ class RWKV7(nn.Module):
         self.layer_id = layer_id
         self.n_embd = n_embd
         dim_att = n_embd
+
+        load_attn(HEAD_SIZE=HEAD_SIZE)
+
+        # Enable wind ops.
+        self.use_wind = True
 
         self.head_size = HEAD_SIZE
         self.n_head = dim_att // self.head_size
@@ -323,7 +332,10 @@ class RWKV7(nn.Module):
         mk = torch.sigmoid(self.time_misc_k + (xk @ self.mk_w1) @ self.mk_w2)
         k = k * torch.clamp(w*mk, max=0).exp()
 
-        x = RUN_CUDA_RWKV7g(r.bfloat16(), w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16())
+        if self.use_wind:
+            x = attn(r.bfloat16(), w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16(), HEAD_SIZE=HEAD_SIZE)
+        else:
+            x = RUN_CUDA_RWKV7g(r.bfloat16(), w.bfloat16(), k.bfloat16(), v.bfloat16(), -kk.bfloat16(), (kk*a).bfloat16())
         x = self.ln_x(x.view(B * T, C)).view(B, T, C)
 
         x = x + ((r.view(B,T,H,-1)*k.view(B,T,H,-1)*self.time_faaaa).sum(dim=-1, keepdim=True) * v.view(B,T,H,-1)).view(B,T,C)
