@@ -35,6 +35,8 @@ from timm.data import Mixup
 from timm.utils import accuracy, ModelEma
 import utils
 
+import wandb
+
 
 class MaskingGenerator(ABC):
     def __init__(self, input_size):
@@ -363,6 +365,12 @@ def main(args):
                 p.requires_grad = False
         except:
             print('no patch embed')
+
+    student_parameters = sum(params.numel() for params in model.student.parameters())
+    print(f'{student_parameters = }')
+    teacher_parameters = sum(params.numel() for params in model.teacher.parameters())
+    print(f'{teacher_parameters = }')
+    # exit(0)
             
     model.to(device)
 
@@ -397,13 +405,14 @@ def main(args):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
 
         model_without_ddp.load_state_dict(checkpoint['model'])
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
+            # args.start_epoch = 100
             if args.model_ema:
                 utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
             if 'scaler' in checkpoint:
@@ -411,6 +420,8 @@ def main(args):
         lr_scheduler.step(args.start_epoch)
 
     print(f"Start training for {args.epochs} epochs")
+    if torch.distributed.get_rank() == 0:
+        wandb.init(name='vrwkv7-93M', project='distill_dinov2_imagenet', resume=True)
     start_time = time.time()
     max_accuracy = 0.0
     for epoch in range(args.start_epoch, args.epochs):
@@ -442,6 +453,8 @@ def main(args):
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch,
                      'n_parameters': n_parameters}
+        
+        
         
         if args.output_dir and utils.is_main_process():
             with (output_dir / "log.txt").open("a") as f:
@@ -499,6 +512,12 @@ def train_one_epoch(model: torch.nn.Module,
         torch.cuda.synchronize()
         if model_ema is not None:
             model_ema.update(model.module.student.backbone)
+
+        if torch.distributed.get_rank() == 0:
+            wandb.log({
+                'epoch': epoch,
+                'loss': loss_value
+            })
 
         metric_logger.update(loss=loss_value)
         metric_logger.update(patch_loss=patch_loss_value)

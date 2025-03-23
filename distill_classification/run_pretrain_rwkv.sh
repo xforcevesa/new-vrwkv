@@ -3,12 +3,13 @@
 #### access DINOv2
 
 python -m torch.distributed.launch --nproc_per_node=8 --use_env main.py \
-    --batch-size 64 --warmup-epochs 5 --epochs 300 \
+    --batch-size 128 --warmup-epochs 5 --epochs 300 \
     --data-set IMNET --data-path ../classification/imagenet/ \
     --teacher-model vit_large --target_model vit_base --model models_rwkv_dinov2 \
     --patch_size 14 --mask_probability 0.5 --mask_ratio 0.5 --mask_first_n \
     --lambda_token 1.0 --lambda_fea 1.0 --lambda_patch 1.0 \
-    --distributed --world_size 8 --output_dir log/DINOv2_training_RWKV;
+    --distributed --world_size 8 --output_dir log/DINOv2_training_RWKV \
+    --resume log/DINOv2_training_RWKV/checkpoint.pth;
 
 
 

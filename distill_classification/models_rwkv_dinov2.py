@@ -42,6 +42,11 @@ class MetaArch(nn.Module):
             interpolate_offset=0.1)
 
         embed_dim = student.embed_dim
+
+        import os
+
+        # os.environ['http_proxy'] = 'http://127.0.0.1:8889'
+        # os.environ['https_proxy'] = 'http://127.0.0.1:8889'
         
         if cfg.teacher_model == 'vit_base':
             teacher_backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14_lc')
@@ -52,6 +57,9 @@ class MetaArch(nn.Module):
         elif cfg.teacher_model == 'vit_giant':
             teacher_backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitg14_lc')
         teacher_backbone.eval()
+
+        # del os.environ['http_proxy']
+        # del os.environ['https_proxy']
 
         student_model_dict['backbone'] = student
         teacher_model_dict['backbone'] = teacher_backbone.backbone

@@ -234,6 +234,7 @@ class RWKV7(nn.Module):
 
             self.n_layer = n_layer
 
+    @torch.compile
     def forward(self, x, v1, res=None, scan=[SCAN_FORWARD, SCAN_BACKWARD]):
         scan = scan[self.layer_id % len(scan)]
         # trans = Rearrange('b (h w) c -> b (w h) c', h=res[0])
