@@ -1,5 +1,15 @@
 # Vision RWKV (New Generation)
 
+## NOTICE
+
+Due to the issue detailed in [Problem: High CUDA Memory Usage When Training vrwkv7 Compared to ViT Distillation](https://github.com/xforcevesa/new-vrwkv/issues/2), we strongly recommend using the code from the `distill` branch instead of the `main` branch.
+
+Using the `main` branch may result in crashes or other unexpected behaviors during training due to memory inefficiencies that are being addressed in the referenced issue.
+
+For optimal performance and stability, please switch to the `distill` branch.
+
+## Synopsis
+
 New structure for `vrwkv6` and `vrwkv7` model is ready in classification, fully based on the `VMamba` project. However, `vrwkv7` distillation from `DINOv2` is in progress, awaiting for further testing. View the synopsis in the [distill_classification](./distill_classification/README.md)
 
 We'll also add other models for contrastive experiments.
@@ -9,8 +19,6 @@ Please follow the instructions in [the old README](README_OLD.md) to setup the e
 See classification [here](./classification/readme.md).
 
 ## Issue
-
-This issue is well addressed with much better performance and efficiency. Thanks to the help of [wind_rwkv](https://github.com/johanwind/wind_rwkv/) very much!
 
 Original issue:
 
